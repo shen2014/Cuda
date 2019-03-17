@@ -1,0 +1,91 @@
+
+# -*- coding: utf-8 -*-
+
+import numpy as np
+from numba import cuda
+
+from numba.cuda.random import create_xoroshiro128p_states,  xoroshiro128p_normal_float32, xoroshiro128p_normal_float64
+
+from univariate_gaussian import gaussian_generator_float32, gaussian_generator_float64
+
+@cuda.jit
+def add_gaussian_squared(d_chi, d_gaussian):
+	
+	thread_id = cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x
+	
+	d_chi[thread_id] = d_chi[thread_id] + d_gaussian[thread_id] * d_gaussian[thread_id]
+
+
+def chi2_generator(df, num_sim, dtype_, seed_ = 1):
+	
+	h_chi2 = np.zeros(num_sim, dtype_)
+
+	d_chi2 = cuda.to_device(h_chi2)
+	
+	
+	threads_per_block = 1
+	
+	blocks            = num_sim
+	
+	d_gaussian        = cuda.device_array(shape = (num_sim * df,), dtype = dtype_)
+	
+	rng_states        = create_xoroshiro128p_states(num_sim *df, seed = seed_)
+	
+	if dtype_ == 'float64':
+
+		gaussian_generator_float64[blocks * df, threads_per_block](rng_states, d_gaussian) 
+	
+	elif dtype_ == 'float32':
+
+		gaussian_generator_float32[blocks * df, threads_per_block](rng_states, d_gaussian)		
+
+	else:
+		raise ValueError('unknown float data type')
+	
+	for i in range(df):
+		
+		add_gaussian_squared[blocks, threads_per_block](d_chi2, d_gaussian[i*num_sim: i*num_sim + num_sim - 1])
+
+	d_chi2.copy_to_host(h_chi2)
+	
+	return h_chi2
+	
+	
+if __name__ == '__main__':
+
+	import matplotlib.pyplot as plt
+	from   scipy.stats import gaussian_kde, chi2
+	
+	num_sim = 10000000
+	dtype   = 'float64'	
+	
+	# degree of freedom
+	df      = 10
+	
+	cuda_chi2_sample      = chi2_generator(df, num_sim, dtype)
+	
+	chi2_sum_of_gaussian  = np.zeros(num_sim)
+	
+	chi2_sample           = np.zeros(num_sim)
+	
+	for i in range(df):
+		
+		g                    = np.random.normal(size = num_sim)
+		chi2_sum_of_gaussian += (g*g)
+		
+		
+	kernel  = gaussian_kde(cuda_chi2_sample)
+	
+	x       = np.linspace(chi2.ppf(0.01, df), chi2.ppf(0.99, df), 100)
+	
+	fig, ax = plt.subplots(1, 1)
+	
+	ax.plot(x, chi2.pdf(x, df), 'r-',   lw = 5, alpha = 0.6, label = 'chi-squared pdf')
+	
+	ax.plot(x, kernel.pdf(x), 'k-', lw = 2, label = 'kernel estimated pdf of gpu simulation')
+	
+	ax.hist(cuda_chi2_sample, bins = 1000, density=True, histtype='stepfilled', alpha=0.2, label = 'histogram of gpu sample')
+	
+	ax.legend(loc = 'best')
+	
+	plt.show()	
